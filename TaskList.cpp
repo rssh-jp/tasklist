@@ -28,6 +28,9 @@ bool g_isUpdatingUI = false;
 int g_sidebarWidth = 280;
 bool g_isDraggingSplitter = false;
 
+bool g_hasSavedWindowPlacement = false;
+WINDOWPLACEMENT g_savedWindowPlacement = { sizeof(WINDOWPLACEMENT) };
+
 WNDPROC g_OldEditProc;
 
 std::wstring GetCurrentTimeString() {
@@ -36,6 +39,227 @@ std::wstring GetCurrentTimeString() {
     wchar_t buf[64];
     swprintf_s(buf, L"%04d/%02d/%02d %02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
     return buf;
+}
+
+std::wstring GetTaskStoragePath() {
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(NULL, path, MAX_PATH);
+
+    std::wstring filePath = path;
+    size_t pos = filePath.find_last_of(L"\\/");
+    if (pos != std::wstring::npos) {
+        filePath.erase(pos + 1);
+    }
+    else {
+        filePath.clear();
+    }
+
+    filePath += L"tasks.dat";
+    return filePath;
+}
+
+bool WriteWString(FILE* fp, const std::wstring& value) {
+    unsigned int length = static_cast<unsigned int>(value.size());
+    if (fwrite(&length, sizeof(length), 1, fp) != 1) {
+        return false;
+    }
+
+    if (length > 0 && fwrite(value.data(), sizeof(wchar_t), length, fp) != length) {
+        return false;
+    }
+
+    return true;
+}
+
+bool ReadWString(FILE* fp, std::wstring& value) {
+    unsigned int length = 0;
+    if (fread(&length, sizeof(length), 1, fp) != 1) {
+        return false;
+    }
+
+    value.resize(length);
+    if (length > 0 && fread(&value[0], sizeof(wchar_t), length, fp) != length) {
+        return false;
+    }
+
+    return true;
+}
+
+void RefreshTaskList(HWND hList) {
+    ListView_DeleteAllItems(hList);
+
+    for (int i = 0; i < static_cast<int>(g_tasks.size()); ++i) {
+        LVITEM lvi = { 0 };
+        lvi.mask = LVIF_TEXT;
+        lvi.iItem = i;
+        lvi.pszText = const_cast<LPWSTR>(g_tasks[i].title.c_str());
+        ListView_InsertItem(hList, &lvi);
+    }
+}
+
+bool SaveTasksToFile() {
+    std::wstring path = GetTaskStoragePath();
+    FILE* fp = nullptr;
+    if (_wfopen_s(&fp, path.c_str(), L"wb") != 0 || !fp) {
+        return false;
+    }
+
+    unsigned int count = static_cast<unsigned int>(g_tasks.size());
+    bool ok = fwrite(&count, sizeof(count), 1, fp) == 1;
+    for (const Task& task : g_tasks) {
+        ok = ok && WriteWString(fp, task.title)
+            && WriteWString(fp, task.details)
+            && WriteWString(fp, task.created_at)
+            && WriteWString(fp, task.updated_at);
+        if (!ok) {
+            break;
+        }
+    }
+
+    fclose(fp);
+    return ok;
+}
+
+bool LoadTasksFromFile(HWND hList, HWND hEditDetails) {
+    g_tasks.clear();
+
+    std::wstring path = GetTaskStoragePath();
+    FILE* fp = nullptr;
+    if (_wfopen_s(&fp, path.c_str(), L"rb") != 0 || !fp) {
+        RefreshTaskList(hList);
+        g_selectedIndex = -1;
+        EnableWindow(hEditDetails, FALSE);
+        SetWindowText(hEditDetails, L"");
+        return false;
+    }
+
+    unsigned int count = 0;
+    bool ok = fread(&count, sizeof(count), 1, fp) == 1;
+    for (unsigned int i = 0; ok && i < count; ++i) {
+        Task task;
+        ok = ReadWString(fp, task.title)
+            && ReadWString(fp, task.details)
+            && ReadWString(fp, task.created_at)
+            && ReadWString(fp, task.updated_at);
+        if (ok) {
+            g_tasks.push_back(task);
+        }
+    }
+
+    fclose(fp);
+
+    if (!ok) {
+        g_tasks.clear();
+    }
+
+    RefreshTaskList(hList);
+    g_selectedIndex = -1;
+
+    if (!g_tasks.empty()) {
+        g_selectedIndex = 0;
+        EnableWindow(hEditDetails, TRUE);
+        SetWindowText(hEditDetails, g_tasks[0].details.c_str());
+        ListView_SetItemState(hList, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(hList, 0, FALSE);
+    }
+    else {
+        EnableWindow(hEditDetails, FALSE);
+        SetWindowText(hEditDetails, L"");
+    }
+
+    return ok;
+}
+
+std::wstring GetUiStatePath() {
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(NULL, path, MAX_PATH);
+
+    std::wstring filePath = path;
+    size_t pos = filePath.find_last_of(L"\\/");
+    if (pos != std::wstring::npos) {
+        filePath.erase(pos + 1);
+    }
+    else {
+        filePath.clear();
+    }
+
+    filePath += L"ui_state.dat";
+    return filePath;
+}
+
+bool LoadUiState() {
+    g_sidebarWidth = 280;
+    g_hasSavedWindowPlacement = false;
+    g_savedWindowPlacement = { sizeof(WINDOWPLACEMENT) };
+
+    std::wstring path = GetUiStatePath();
+    FILE* fp = nullptr;
+    if (_wfopen_s(&fp, path.c_str(), L"rb") != 0 || !fp) {
+        return false;
+    }
+
+    DWORD magic = 0;
+    DWORD version = 0;
+    bool hasPlacement = false;
+    bool ok = fread(&magic, sizeof(magic), 1, fp) == 1
+        && fread(&version, sizeof(version), 1, fp) == 1
+        && fread(&g_sidebarWidth, sizeof(g_sidebarWidth), 1, fp) == 1
+        && fread(&hasPlacement, sizeof(hasPlacement), 1, fp) == 1;
+
+    if (ok && magic == 0x31534955 && version == 1 && hasPlacement) {
+        g_savedWindowPlacement.length = sizeof(g_savedWindowPlacement);
+        ok = fread(&g_savedWindowPlacement.flags, sizeof(g_savedWindowPlacement.flags), 1, fp) == 1
+            && fread(&g_savedWindowPlacement.showCmd, sizeof(g_savedWindowPlacement.showCmd), 1, fp) == 1
+            && fread(&g_savedWindowPlacement.ptMinPosition, sizeof(g_savedWindowPlacement.ptMinPosition), 1, fp) == 1
+            && fread(&g_savedWindowPlacement.ptMaxPosition, sizeof(g_savedWindowPlacement.ptMaxPosition), 1, fp) == 1
+            && fread(&g_savedWindowPlacement.rcNormalPosition, sizeof(g_savedWindowPlacement.rcNormalPosition), 1, fp) == 1;
+        g_hasSavedWindowPlacement = ok;
+    }
+    else if (!hasPlacement) {
+        ok = ok && magic == 0x31534955 && version == 1;
+    }
+
+    fclose(fp);
+
+    if (!ok) {
+        g_sidebarWidth = 280;
+        g_hasSavedWindowPlacement = false;
+        g_savedWindowPlacement = { sizeof(WINDOWPLACEMENT) };
+    }
+
+    return ok;
+}
+
+bool SaveUiState(HWND hwnd) {
+    std::wstring path = GetUiStatePath();
+    FILE* fp = nullptr;
+    if (_wfopen_s(&fp, path.c_str(), L"wb") != 0 || !fp) {
+        return false;
+    }
+
+    DWORD magic = 0x31534955;
+    DWORD version = 1;
+    bool hasPlacement = false;
+    WINDOWPLACEMENT placement = { sizeof(WINDOWPLACEMENT) };
+    if (hwnd != NULL && IsWindow(hwnd) && GetWindowPlacement(hwnd, &placement)) {
+        hasPlacement = true;
+    }
+
+    bool ok = fwrite(&magic, sizeof(magic), 1, fp) == 1
+        && fwrite(&version, sizeof(version), 1, fp) == 1
+        && fwrite(&g_sidebarWidth, sizeof(g_sidebarWidth), 1, fp) == 1
+        && fwrite(&hasPlacement, sizeof(hasPlacement), 1, fp) == 1;
+
+    if (ok && hasPlacement) {
+        ok = fwrite(&placement.flags, sizeof(placement.flags), 1, fp) == 1
+            && fwrite(&placement.showCmd, sizeof(placement.showCmd), 1, fp) == 1
+            && fwrite(&placement.ptMinPosition, sizeof(placement.ptMinPosition), 1, fp) == 1
+            && fwrite(&placement.ptMaxPosition, sizeof(placement.ptMaxPosition), 1, fp) == 1
+            && fwrite(&placement.rcNormalPosition, sizeof(placement.rcNormalPosition), 1, fp) == 1;
+    }
+
+    fclose(fp);
+    return ok;
 }
 
 LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -98,6 +322,7 @@ void AddTaskFromInput(HWND hwnd, HWND hEditInput, HWND hList, HWND hEditDetails)
     ListView_InsertItem(hList, &lvi);
 
     ListView_SetItemState(hList, newIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    SaveTasksToFile();
 
     SetWindowText(hEditInput, L"");
     SetFocus(hEditDetails);
@@ -140,6 +365,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         g_OldEditProc = (WNDPROC)SetWindowLongPtr(hEditInput, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
 
+        LoadTasksFromFile(hList, hEditDetails);
         UpdateLayout(hwnd, hEditInput, hBtnAdd, hList, hEditDetails);
         break;
     }
@@ -184,6 +410,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (g_isDraggingSplitter) {
             g_isDraggingSplitter = false;
             ReleaseCapture();
+            SaveUiState(hwnd);
         }
         break;
     }
@@ -204,6 +431,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 g_tasks[g_selectedIndex].details = buffer.data();
                 g_tasks[g_selectedIndex].updated_at = GetCurrentTimeString();
+                SaveTasksToFile();
 
                 ListView_RedrawItems(hList, g_selectedIndex, g_selectedIndex);
                 UpdateWindow(hList);
@@ -211,6 +439,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         break;
     }
+
+    case WM_EXITSIZEMOVE:
+        SaveUiState(hwnd);
+        break;
 
     case WM_NOTIFY: {
         LPNMHDR pnmh = (LPNMHDR)lParam;
@@ -310,6 +542,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_DESTROY:
+        SaveUiState(hwnd);
+        SaveTasksToFile();
         PostQuitMessage(0);
         break;
     }
@@ -318,6 +552,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
     const wchar_t CLASS_NAME[] = L"TaskListAppClass";
+
+    LoadUiState();
 
     WNDCLASS wc = { };
     wc.lpfnWndProc = WndProc;
@@ -332,14 +568,26 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
         0,
         CLASS_NAME,
         L"タスク管理アプリ",
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 850, 600,
         NULL, NULL, hInstance, NULL
     );
 
     if (hwnd == NULL) return 0;
 
-    ShowWindow(hwnd, nCmdShow);
+    if (g_hasSavedWindowPlacement) {
+        SetWindowPlacement(hwnd, &g_savedWindowPlacement);
+    }
+
+    int initialShowCmd = nCmdShow;
+    if (g_hasSavedWindowPlacement) {
+        initialShowCmd = g_savedWindowPlacement.showCmd;
+        if (initialShowCmd == SW_SHOWMINIMIZED) {
+            initialShowCmd = SW_SHOWNORMAL;
+        }
+    }
+
+    ShowWindow(hwnd, initialShowCmd);
 
     MSG msg = { };
     while (GetMessage(&msg, NULL, 0, 0)) {
