@@ -7,10 +7,14 @@
 #pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #pragma comment(lib, "comctl32.lib")
 
-#define ID_EDIT_INPUT   101
-#define ID_LISTVIEW     102
-#define ID_BTN_ADD      103
-#define ID_EDIT_DETAILS 104
+#define ID_EDIT_INPUT       101
+#define ID_LISTVIEW         102
+#define ID_BTN_ADD          103
+#define ID_EDIT_DETAILS     104
+#define ID_BTN_ARCHIVE_LIST 105
+#define ID_ARCHIVE_LISTVIEW 106
+#define ID_BTN_UNARCHIVE    107
+#define IDM_ARCHIVE         201
 
 const int SPLITTER_WIDTH = 6;
 
@@ -19,9 +23,11 @@ struct Task {
     std::wstring details;
     std::wstring created_at;
     std::wstring updated_at;
+    bool archived = false;
 };
 
 std::vector<Task> g_tasks;
+std::vector<int> g_visibleIndices;
 int g_selectedIndex = -1;
 bool g_isUpdatingUI = false;
 
@@ -87,11 +93,15 @@ bool ReadWString(FILE* fp, std::wstring& value) {
 
 void RefreshTaskList(HWND hList) {
     ListView_DeleteAllItems(hList);
+    g_visibleIndices.clear();
 
     for (int i = 0; i < static_cast<int>(g_tasks.size()); ++i) {
+        if (g_tasks[i].archived) continue;
+        int visiblePos = static_cast<int>(g_visibleIndices.size());
+        g_visibleIndices.push_back(i);
         LVITEM lvi = { 0 };
         lvi.mask = LVIF_TEXT;
-        lvi.iItem = i;
+        lvi.iItem = visiblePos;
         lvi.pszText = const_cast<LPWSTR>(g_tasks[i].title.c_str());
         ListView_InsertItem(hList, &lvi);
     }
@@ -104,13 +114,18 @@ bool SaveTasksToFile() {
         return false;
     }
 
+    DWORD magic = 0x534B5441; // 'ATKS'
+    DWORD version = 2;
     unsigned int count = static_cast<unsigned int>(g_tasks.size());
-    bool ok = fwrite(&count, sizeof(count), 1, fp) == 1;
+    bool ok = fwrite(&magic, sizeof(magic), 1, fp) == 1
+        && fwrite(&version, sizeof(version), 1, fp) == 1
+        && fwrite(&count, sizeof(count), 1, fp) == 1;
     for (const Task& task : g_tasks) {
         ok = ok && WriteWString(fp, task.title)
             && WriteWString(fp, task.details)
             && WriteWString(fp, task.created_at)
-            && WriteWString(fp, task.updated_at);
+            && WriteWString(fp, task.updated_at)
+            && fwrite(&task.archived, sizeof(task.archived), 1, fp) == 1;
         if (!ok) {
             break;
         }
@@ -133,14 +148,30 @@ bool LoadTasksFromFile(HWND hList, HWND hEditDetails) {
         return false;
     }
 
+    // マジックナンバーを読み込んでバージョンを判定
+    DWORD magic = 0;
+    DWORD version = 1;
     unsigned int count = 0;
-    bool ok = fread(&count, sizeof(count), 1, fp) == 1;
+    bool ok = fread(&magic, sizeof(magic), 1, fp) == 1;
+    if (ok && magic == 0x534B5441) {
+        // v2以降: magic + version + count
+        ok = fread(&version, sizeof(version), 1, fp) == 1
+            && fread(&count, sizeof(count), 1, fp) == 1;
+    } else {
+        // v1: 先頭4バイトがcountだった
+        version = 1;
+        count = static_cast<unsigned int>(magic);
+    }
+
     for (unsigned int i = 0; ok && i < count; ++i) {
         Task task;
         ok = ReadWString(fp, task.title)
             && ReadWString(fp, task.details)
             && ReadWString(fp, task.created_at)
             && ReadWString(fp, task.updated_at);
+        if (ok && version >= 2) {
+            ok = fread(&task.archived, sizeof(task.archived), 1, fp) == 1;
+        }
         if (ok) {
             g_tasks.push_back(task);
         }
@@ -155,10 +186,10 @@ bool LoadTasksFromFile(HWND hList, HWND hEditDetails) {
     RefreshTaskList(hList);
     g_selectedIndex = -1;
 
-    if (!g_tasks.empty()) {
+    if (!g_visibleIndices.empty()) {
         g_selectedIndex = 0;
         EnableWindow(hEditDetails, TRUE);
-        SetWindowText(hEditDetails, g_tasks[0].details.c_str());
+        SetWindowText(hEditDetails, g_tasks[g_visibleIndices[0]].details.c_str());
         ListView_SetItemState(hList, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
         ListView_EnsureVisible(hList, 0, FALSE);
     }
@@ -273,7 +304,7 @@ LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     return CallWindowProc(g_OldEditProc, hwnd, msg, wParam, lParam);
 }
 
-void UpdateLayout(HWND hwnd, HWND hEditInput, HWND hBtnAdd, HWND hList, HWND hEditDetails) {
+void UpdateLayout(HWND hwnd, HWND hEditInput, HWND hBtnAdd, HWND hList, HWND hEditDetails, HWND hBtnArchiveList) {
     if (!hEditInput || !hBtnAdd || !hList || !hEditDetails) return;
 
     RECT rc;
@@ -284,9 +315,15 @@ void UpdateLayout(HWND hwnd, HWND hEditInput, HWND hBtnAdd, HWND hList, HWND hEd
     if (g_sidebarWidth < 180) g_sidebarWidth = 180;
     if (g_sidebarWidth > winWidth - 150) g_sidebarWidth = winWidth - 150;
 
+    const int btnArchiveH = 25;
+    const int listBottom = winHeight - 50 - btnArchiveH - 6;
+
     SetWindowPos(hEditInput, NULL, 10, 10, g_sidebarWidth - 80, 25, SWP_NOZORDER);
     SetWindowPos(hBtnAdd, NULL, g_sidebarWidth - 65, 10, 60, 25, SWP_NOZORDER);
-    SetWindowPos(hList, NULL, 10, 40, g_sidebarWidth - 15, winHeight - 50, SWP_NOZORDER);
+    SetWindowPos(hList, NULL, 10, 40, g_sidebarWidth - 15, listBottom, SWP_NOZORDER);
+    if (hBtnArchiveList) {
+        SetWindowPos(hBtnArchiveList, NULL, 10, 40 + listBottom + 6, g_sidebarWidth - 15, btnArchiveH, SWP_NOZORDER);
+    }
 
     ListView_SetColumnWidth(hList, 0, g_sidebarWidth - 25);
 
@@ -313,23 +350,128 @@ void AddTaskFromInput(HWND hwnd, HWND hEditInput, HWND hList, HWND hEditDetails)
 
     g_tasks.push_back(newTask);
 
-    int newIndex = static_cast<int>(g_tasks.size() - 1);
+    int visiblePos = static_cast<int>(g_visibleIndices.size());
+    g_visibleIndices.push_back(static_cast<int>(g_tasks.size() - 1));
 
     LVITEM lvi = { 0 };
     lvi.mask = LVIF_TEXT;
-    lvi.iItem = newIndex;
+    lvi.iItem = visiblePos;
     lvi.pszText = buffer;
     ListView_InsertItem(hList, &lvi);
 
-    ListView_SetItemState(hList, newIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_SetItemState(hList, visiblePos, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     SaveTasksToFile();
 
     SetWindowText(hEditInput, L"");
     SetFocus(hEditDetails);
 }
 
+HWND g_hArchiveWindow = NULL;
+
+LRESULT CALLBACK ArchiveWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    static HWND hArchiveList, hBtnUnarchive;
+    static std::vector<int> s_archiveIndices;
+
+    switch (msg) {
+    case WM_CREATE: {
+        hArchiveList = CreateWindowEx(0, WC_LISTVIEW, L"",
+            WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL,
+            0, 0, 0, 0, hwnd, (HMENU)ID_ARCHIVE_LISTVIEW, GetModuleHandle(NULL), NULL);
+        ListView_SetExtendedListViewStyle(hArchiveList, LVS_EX_FULLROWSELECT);
+
+        LVCOLUMN lvc = { LVCF_TEXT | LVCF_WIDTH, 0, 400, (LPWSTR)L"Task" };
+        ListView_InsertColumn(hArchiveList, 0, &lvc);
+
+        hBtnUnarchive = CreateWindowEx(0, L"BUTTON", L"アーカイブ解除",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 0, 0, hwnd, (HMENU)ID_BTN_UNARCHIVE, GetModuleHandle(NULL), NULL);
+
+        // アーカイブ済みタスクを列挙
+        s_archiveIndices.clear();
+        ListView_DeleteAllItems(hArchiveList);
+        for (int i = 0; i < static_cast<int>(g_tasks.size()); ++i) {
+            if (!g_tasks[i].archived) continue;
+            int pos = static_cast<int>(s_archiveIndices.size());
+            s_archiveIndices.push_back(i);
+            LVITEM lvi = { 0 };
+            lvi.mask = LVIF_TEXT;
+            lvi.iItem = pos;
+            lvi.pszText = const_cast<LPWSTR>(g_tasks[i].title.c_str());
+            ListView_InsertItem(hArchiveList, &lvi);
+        }
+        break;
+    }
+
+    case WM_SIZE: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int w = rc.right;
+        int h = rc.bottom;
+        SetWindowPos(hArchiveList, NULL, 10, 10, w - 20, h - 50, SWP_NOZORDER);
+        SetWindowPos(hBtnUnarchive, NULL, 10, h - 35, 120, 25, SWP_NOZORDER);
+        ListView_SetColumnWidth(hArchiveList, 0, w - 30);
+        break;
+    }
+
+    case WM_COMMAND: {
+        if (LOWORD(wParam) == ID_BTN_UNARCHIVE) {
+            int selItem = ListView_GetNextItem(hArchiveList, -1, LVNI_SELECTED);
+            if (selItem >= 0 && selItem < static_cast<int>(s_archiveIndices.size())) {
+                int taskIdx = s_archiveIndices[selItem];
+                g_tasks[taskIdx].archived = false;
+                SaveTasksToFile();
+
+                // リストを再構築
+                s_archiveIndices.clear();
+                ListView_DeleteAllItems(hArchiveList);
+                for (int i = 0; i < static_cast<int>(g_tasks.size()); ++i) {
+                    if (!g_tasks[i].archived) continue;
+                    int pos = static_cast<int>(s_archiveIndices.size());
+                    s_archiveIndices.push_back(i);
+                    LVITEM lvi = { 0 };
+                    lvi.mask = LVIF_TEXT;
+                    lvi.iItem = pos;
+                    lvi.pszText = const_cast<LPWSTR>(g_tasks[i].title.c_str());
+                    ListView_InsertItem(hArchiveList, &lvi);
+                }
+
+                // 親ウィンドウのリストも更新
+                HWND hParent = GetWindow(hwnd, GW_OWNER);
+                if (hParent) {
+                    HWND hMainList = GetDlgItem(hParent, ID_LISTVIEW);
+                    HWND hMainDetails = GetDlgItem(hParent, ID_EDIT_DETAILS);
+                    if (hMainList) {
+                        RefreshTaskList(hMainList);
+                        if (!g_visibleIndices.empty()) {
+                            g_selectedIndex = 0;
+                            if (hMainDetails) {
+                                EnableWindow(hMainDetails, TRUE);
+                                SetWindowText(hMainDetails, g_tasks[g_visibleIndices[0]].details.c_str());
+                            }
+                            ListView_SetItemState(hMainList, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                        } else {
+                            g_selectedIndex = -1;
+                            if (hMainDetails) {
+                                EnableWindow(hMainDetails, FALSE);
+                                SetWindowText(hMainDetails, L"");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        break;
+    }
+
+    case WM_DESTROY:
+        g_hArchiveWindow = NULL;
+        break;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    static HWND hEditInput, hList, hBtnAdd, hEditDetails;
+    static HWND hEditInput, hList, hBtnAdd, hEditDetails, hBtnArchiveList;
 
     switch (msg) {
     case WM_CREATE: {
@@ -363,15 +505,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         EnableWindow(hEditDetails, FALSE);
 
+        hBtnArchiveList = CreateWindowEx(0, L"BUTTON", L"アーカイブ一覧",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 0, 0, hwnd, (HMENU)ID_BTN_ARCHIVE_LIST, GetModuleHandle(NULL), NULL);
+
         g_OldEditProc = (WNDPROC)SetWindowLongPtr(hEditInput, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
 
         LoadTasksFromFile(hList, hEditDetails);
-        UpdateLayout(hwnd, hEditInput, hBtnAdd, hList, hEditDetails);
+        UpdateLayout(hwnd, hEditInput, hBtnAdd, hList, hEditDetails, hBtnArchiveList);
         break;
     }
 
     case WM_SIZE: {
-        UpdateLayout(hwnd, hEditInput, hBtnAdd, hList, hEditDetails);
+        UpdateLayout(hwnd, hEditInput, hBtnAdd, hList, hEditDetails, hBtnArchiveList);
         break;
     }
 
@@ -401,7 +547,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_MOUSEMOVE: {
         if (g_isDraggingSplitter) {
             g_sidebarWidth = (short)LOWORD(lParam);
-            UpdateLayout(hwnd, hEditInput, hBtnAdd, hList, hEditDetails);
+            UpdateLayout(hwnd, hEditInput, hBtnAdd, hList, hEditDetails, hBtnArchiveList);
         }
         break;
     }
@@ -419,18 +565,61 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (LOWORD(wParam) == ID_BTN_ADD) {
             AddTaskFromInput(hwnd, hEditInput, hList, hEditDetails);
         }
+        else if (LOWORD(wParam) == ID_BTN_ARCHIVE_LIST) {
+            if (g_hArchiveWindow && IsWindow(g_hArchiveWindow)) {
+                SetForegroundWindow(g_hArchiveWindow);
+            } else {
+                const wchar_t ARCH_CLASS[] = L"ArchiveWindowClass";
+                WNDCLASS wc = {};
+                wc.lpfnWndProc = ArchiveWndProc;
+                wc.hInstance = GetModuleHandle(NULL);
+                wc.lpszClassName = ARCH_CLASS;
+                wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+                wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+                RegisterClass(&wc);
+
+                g_hArchiveWindow = CreateWindowEx(0, ARCH_CLASS, L"アーカイブ一覧",
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT, CW_USEDEFAULT, 500, 400,
+                    hwnd, NULL, GetModuleHandle(NULL), NULL);
+                ShowWindow(g_hArchiveWindow, SW_SHOW);
+            }
+        }
         else if (LOWORD(wParam) == 9999) { // Ctrl + N
             SetFocus(hEditInput);
             SendMessage(hEditInput, EM_SETSEL, 0, -1);
         }
+        else if (LOWORD(wParam) == IDM_ARCHIVE) {
+            int selItem = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+            if (selItem >= 0 && selItem < static_cast<int>(g_visibleIndices.size())) {
+                int taskIdx = g_visibleIndices[selItem];
+                g_tasks[taskIdx].archived = true;
+                SaveTasksToFile();
+                RefreshTaskList(hList);
+                g_selectedIndex = -1;
+                if (!g_visibleIndices.empty()) {
+                    int newSel = min(selItem, static_cast<int>(g_visibleIndices.size()) - 1);
+                    g_selectedIndex = newSel;
+                    g_isUpdatingUI = true;
+                    EnableWindow(hEditDetails, TRUE);
+                    SetWindowText(hEditDetails, g_tasks[g_visibleIndices[newSel]].details.c_str());
+                    g_isUpdatingUI = false;
+                    ListView_SetItemState(hList, newSel, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                } else {
+                    EnableWindow(hEditDetails, FALSE);
+                    SetWindowText(hEditDetails, L"");
+                }
+            }
+        }
         else if (LOWORD(wParam) == ID_EDIT_DETAILS && HIWORD(wParam) == EN_CHANGE) {
-            if (!g_isUpdatingUI && g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(g_tasks.size())) {
+            if (!g_isUpdatingUI && g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(g_visibleIndices.size())) {
+                int taskIdx = g_visibleIndices[g_selectedIndex];
                 int length = GetWindowTextLength(hEditDetails);
                 std::vector<wchar_t> buffer(length + 1);
                 GetWindowText(hEditDetails, buffer.data(), length + 1);
 
-                g_tasks[g_selectedIndex].details = buffer.data();
-                g_tasks[g_selectedIndex].updated_at = GetCurrentTimeString();
+                g_tasks[taskIdx].details = buffer.data();
+                g_tasks[taskIdx].updated_at = GetCurrentTimeString();
                 SaveTasksToFile();
 
                 ListView_RedrawItems(hList, g_selectedIndex, g_selectedIndex);
@@ -454,7 +643,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 else if (pLVCD->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
                     int index = (int)pLVCD->nmcd.dwItemSpec;
-                    if (index < 0 || index >= static_cast<int>(g_tasks.size())) return CDRF_DODEFAULT;
+                    if (index < 0 || index >= static_cast<int>(g_visibleIndices.size())) return CDRF_DODEFAULT;
+                    int taskIdx = g_visibleIndices[index];
 
                     HDC hdc = pLVCD->nmcd.hdc;
                     RECT rc = pLVCD->nmcd.rc;
@@ -494,7 +684,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     RECT titleRc = textRc;
                     titleRc.top += 6;
                     titleRc.bottom = titleRc.top + 28;
-                    DrawText(hdc, g_tasks[index].title.c_str(), -1, &titleRc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    DrawText(hdc, g_tasks[taskIdx].title.c_str(), -1, &titleRc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
                     SelectObject(hdc, hOldFont);
                     DeleteObject(hBoldFont);
@@ -505,7 +695,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     hOldFont = (HFONT)SelectObject(hdc, hSmallFont);
 
                     SetTextColor(hdc, RGB(110, 110, 110));
-                    std::wstring timeStr = L"作成:" + g_tasks[index].created_at + L"  更新:" + g_tasks[index].updated_at;
+                    std::wstring timeStr = L"作成:" + g_tasks[taskIdx].created_at + L"  更新:" + g_tasks[taskIdx].updated_at;
 
                     RECT timeRc = textRc;
                     timeRc.top += 38;
@@ -522,10 +712,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if ((pNmlv->uChanged & LVIF_STATE) && (pNmlv->uNewState & LVIS_SELECTED)) {
                     g_selectedIndex = pNmlv->iItem;
 
-                    if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(g_tasks.size())) {
+                    if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(g_visibleIndices.size())) {
                         g_isUpdatingUI = true;
                         EnableWindow(hEditDetails, TRUE);
-                        SetWindowText(hEditDetails, g_tasks[g_selectedIndex].details.c_str());
+                        SetWindowText(hEditDetails, g_tasks[g_visibleIndices[g_selectedIndex]].details.c_str());
                         g_isUpdatingUI = false;
                     }
                 }
@@ -533,15 +723,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             else if (pnmh->code == LVN_GETINFOTIP) {
                 NMLVGETINFOTIP* pGetInfoTip = (NMLVGETINFOTIP*)lParam;
                 int itemIndex = pGetInfoTip->iItem;
-                if (itemIndex >= 0 && itemIndex < static_cast<int>(g_tasks.size())) {
-                    wcscpy_s(pGetInfoTip->pszText, pGetInfoTip->cchTextMax, g_tasks[itemIndex].title.c_str());
+                if (itemIndex >= 0 && itemIndex < static_cast<int>(g_visibleIndices.size())) {
+                    wcscpy_s(pGetInfoTip->pszText, pGetInfoTip->cchTextMax, g_tasks[g_visibleIndices[itemIndex]].title.c_str());
                 }
             }
+                else if (pnmh->code == NM_RCLICK) {
+                    LPNMITEMACTIVATE pNMIA = (LPNMITEMACTIVATE)lParam;
+                    int clickedItem = pNMIA->iItem;
+                    if (clickedItem >= 0 && clickedItem < static_cast<int>(g_visibleIndices.size())) {
+                        POINT pt;
+                        GetCursorPos(&pt);
+                        HMENU hMenu = CreatePopupMenu();
+                        AppendMenu(hMenu, MF_STRING, IDM_ARCHIVE, L"アーカイブ");
+                        TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+                        DestroyMenu(hMenu);
+                    }
+                }
+            }
+            break;
         }
-        break;
-    }
-
-    case WM_DESTROY:
         SaveUiState(hwnd);
         SaveTasksToFile();
         PostQuitMessage(0);
