@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -138,14 +138,25 @@
       <EnableSegmentHeap>true</EnableSegmentHeap>
     </Manifest>
   </ItemDefinitionGroup>
-  <ItemGroup>
+    <ItemGroup>
     <ClInclude Include="framework.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="targetver.h" />
-    <ClInclude Include="TaskList.h" />
+    <ClInclude Include="src\AppState.h" />
+    <ClInclude Include="src\ArchiveWindow.h" />
+    <ClInclude Include="src\Ids.h" />
+    <ClInclude Include="src\MainWindow.h" />
+    <ClInclude Include="src\Task.h" />
+    <ClInclude Include="src\TaskStorage.h" />
+    <ClInclude Include="src\UiState.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="TaskList.cpp" />
+    <ClCompile Include="src\AppState.cpp" />
+    <ClCompile Include="src\ArchiveWindow.cpp" />
+    <ClCompile Include="src\MainWindow.cpp" />
+    <ClCompile Include="src\TaskList.cpp" />
+    <ClCompile Include="src\TaskStorage.cpp" />
+    <ClCompile Include="src\UiState.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="TaskList.rc" />
