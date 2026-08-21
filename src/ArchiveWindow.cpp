@@ -102,17 +102,19 @@ LRESULT CALLBACK ArchiveWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 	}
 
 	case WM_APP_FILE_CHANGED: {
-		s_archiveIndices.clear();
-		ListView_DeleteAllItems(hArchiveList);
-		for (int i = 0; i < static_cast<int>(g_tasks.size()); ++i) {
-			if (!g_tasks[i].archived) continue;
-			int pos = static_cast<int>(s_archiveIndices.size());
-			s_archiveIndices.push_back(i);
-			LVITEM lvi = { 0 };
-			lvi.mask = LVIF_TEXT;
-			lvi.iItem = pos;
-			lvi.pszText = const_cast<LPWSTR>(g_tasks[i].title.c_str());
-			ListView_InsertItem(hArchiveList, &lvi);
+		if (GetForegroundWindow() != hwnd) {
+			s_archiveIndices.clear();
+			ListView_DeleteAllItems(hArchiveList);
+			for (int i = 0; i < static_cast<int>(g_tasks.size()); ++i) {
+				if (!g_tasks[i].archived) continue;
+				int pos = static_cast<int>(s_archiveIndices.size());
+				s_archiveIndices.push_back(i);
+				LVITEM lvi = { 0 };
+				lvi.mask = LVIF_TEXT;
+				lvi.iItem = pos;
+				lvi.pszText = const_cast<LPWSTR>(g_tasks[i].title.c_str());
+				ListView_InsertItem(hArchiveList, &lvi);
+			}
 		}
 		break;
 	}

@@ -243,9 +243,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	}
 
 	case WM_APP_FILE_CHANGED:
-		LoadTasksFromFile(hList, hEditDetails);
-		if (g_hArchiveWindow && IsWindow(g_hArchiveWindow)) {
-			PostMessage(g_hArchiveWindow, WM_APP_FILE_CHANGED, 0, 0);
+		if (GetForegroundWindow() != hwnd) {
+			LoadTasksFromFile(hList, hEditDetails);
+			if (g_hArchiveWindow && IsWindow(g_hArchiveWindow)) {
+				PostMessage(g_hArchiveWindow, WM_APP_FILE_CHANGED, 0, 0);
+			}
+		}
+		break;
+
+	case WM_ACTIVATE:
+		if (LOWORD(wParam) != WA_INACTIVE && g_selectedIndex >= 0) {
+			PostMessage(hwnd, WM_APP_FOCUS_DETAILS, 0, 0);
+		}
+		break;
+
+	case WM_APP_FOCUS_DETAILS:
+		if (g_selectedIndex >= 0) {
+			SetFocus(hEditDetails);
 		}
 		break;
 

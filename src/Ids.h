@@ -9,6 +9,7 @@
 #define ID_BTN_UNARCHIVE    107
 #define IDM_ARCHIVE         201
 
-#define WM_APP_FILE_CHANGED (WM_APP + 1)
+#define WM_APP_FILE_CHANGED  (WM_APP + 1)
+#define WM_APP_FOCUS_DETAILS (WM_APP + 2)
 
 const int SPLITTER_WIDTH = 6;
