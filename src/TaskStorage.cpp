@@ -9,6 +9,90 @@
 
 #pragma comment(lib, "comctl32.lib")
 
+// ファイルウォッチャー用スタティック変数
+static HWND    s_hWatcherTarget = NULL;
+static HANDLE  s_hStopEvent     = NULL;
+static HANDLE  s_hWatcherThread = NULL;
+
+static DWORD WINAPI FileWatcherThread(LPVOID) {
+    std::wstring path = GetTaskStoragePath();
+    std::wstring dir  = path;
+    size_t pos = dir.find_last_of(L"\\/");
+    if (pos != std::wstring::npos) dir.erase(pos + 1);
+
+    HANDLE hDir = CreateFileW(dir.c_str(), FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
+    if (hDir == INVALID_HANDLE_VALUE) return 1;
+
+    OVERLAPPED ov   = {};
+    ov.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+
+    BYTE buf[4096];
+    HANDLE handles[2] = { ov.hEvent, s_hStopEvent };
+
+    while (true) {
+        ReadDirectoryChangesW(hDir, buf, sizeof(buf), FALSE,
+            FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME,
+            NULL, &ov, NULL);
+
+        DWORD wait = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+        if (wait != WAIT_OBJECT_0) break; // 停止イベント or エラー
+
+        // tasks.dat への変更か確認
+        bool relevant = false;
+        auto* fni = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buf);
+        for (;;) {
+            std::wstring name(fni->FileName, fni->FileNameLength / sizeof(wchar_t));
+            if (_wcsicmp(name.c_str(), L"tasks.dat") == 0) {
+                relevant = true;
+                break;
+            }
+            if (fni->NextEntryOffset == 0) break;
+            fni = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(
+                reinterpret_cast<BYTE*>(fni) + fni->NextEntryOffset);
+        }
+
+        if (relevant) {
+            if (g_isSaving) {
+                // 自分の保存による通知は無視してフラグをリセット
+                g_isSaving = false;
+            } else {
+                PostMessage(s_hWatcherTarget, WM_APP_FILE_CHANGED, 0, 0);
+            }
+        }
+
+        ResetEvent(ov.hEvent);
+    }
+
+    CloseHandle(ov.hEvent);
+    CloseHandle(hDir);
+    return 0;
+}
+
+void StartFileWatcher(HWND hWnd) {
+    s_hWatcherTarget = hWnd;
+    s_hStopEvent     = CreateEvent(NULL, TRUE, FALSE, NULL);
+    s_hWatcherThread = CreateThread(NULL, 0, FileWatcherThread, NULL, 0, NULL);
+}
+
+void StopFileWatcher() {
+    if (s_hStopEvent) {
+        SetEvent(s_hStopEvent);
+    }
+    if (s_hWatcherThread) {
+        WaitForSingleObject(s_hWatcherThread, 3000);
+        CloseHandle(s_hWatcherThread);
+        s_hWatcherThread = NULL;
+    }
+    if (s_hStopEvent) {
+        CloseHandle(s_hStopEvent);
+        s_hStopEvent = NULL;
+    }
+    s_hWatcherTarget = NULL;
+}
+
 std::wstring GetCurrentTimeString() {
 	SYSTEMTIME st;
 	GetLocalTime(&st);
@@ -78,6 +162,8 @@ void RefreshTaskList(HWND hList) {
 }
 
 bool SaveTasksToFile() {
+	g_isSaving = true;
+
 	std::wstring path = GetTaskStoragePath();
 	FILE* fp = nullptr;
 	if (_wfopen_s(&fp, path.c_str(), L"wb") != 0 || !fp) {

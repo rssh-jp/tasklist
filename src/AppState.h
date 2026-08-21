@@ -7,6 +7,7 @@ extern std::vector<Task> g_tasks;
 extern std::vector<int> g_visibleIndices;
 extern int g_selectedIndex;
 extern bool g_isUpdatingUI;
+extern volatile bool g_isSaving;
 
 extern int g_sidebarWidth;
 extern bool g_isDraggingSplitter;

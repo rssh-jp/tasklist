@@ -10,3 +10,5 @@ bool ReadWString(FILE* fp, std::wstring& value);
 void RefreshTaskList(HWND hList);
 bool SaveTasksToFile();
 bool LoadTasksFromFile(HWND hList, HWND hEditDetails);
+void StartFileWatcher(HWND hWnd);
+void StopFileWatcher();

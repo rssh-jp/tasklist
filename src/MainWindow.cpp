@@ -124,6 +124,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		g_OldEditProc = (WNDPROC)SetWindowLongPtr(hEditInput, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
 
 		LoadTasksFromFile(hList, hEditDetails);
+		StartFileWatcher(hwnd);
 		UpdateLayout(hwnd, hEditInput, hBtnAdd, hList, hEditDetails, hBtnArchiveList);
 		break;
 	}
@@ -241,6 +242,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		break;
 	}
 
+	case WM_APP_FILE_CHANGED:
+		LoadTasksFromFile(hList, hEditDetails);
+		if (g_hArchiveWindow && IsWindow(g_hArchiveWindow)) {
+			PostMessage(g_hArchiveWindow, WM_APP_FILE_CHANGED, 0, 0);
+		}
+		break;
+
 	case WM_EXITSIZEMOVE:
 		SaveUiState(hwnd);
 		break;
@@ -356,6 +364,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	}
 
 	case WM_DESTROY:
+		StopFileWatcher();
 		SaveUiState(hwnd);
 		SaveTasksToFile();
 		PostQuitMessage(0);
